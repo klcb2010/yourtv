@@ -1,0 +1,73 @@
+name: Sync YourTV Releases
+
+on:
+  schedule:
+    - cron: "0 0 * * *"  # 每天凌晨运行
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  sync-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Git
+        run: |
+          git config user.name "klcb2010"
+          git config user.email "klcb2010@gmail.com"
+
+      - name: Set up GitHub Token
+        run: echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Fetch and sync releases from YourTV
+        run: |
+          # 获取上游所有 Releases
+          releases=$(curl -s https://api.github.com/repos/horsemail/yourtv/releases | jq -r '.[] | .tag_name')
+          echo "Found releases: $releases"
+
+          for tag in $releases; do
+            # 检查是否已存在该 Release
+            if curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              https://api.github.com/repos/klcb2010/yourtv/releases/tags/$tag | grep -q '"id":'; then
+              echo "Release $tag already exists, skipping."
+              continue
+            fi
+
+            # 获取 Release 详细信息
+            release_info=$(curl -s https://api.github.com/repos/horsemail/yourtv/releases/tags/$tag)
+            name=$(echo $release_info | jq -r '.name')
+            body=$(echo $release_info | jq -r '.body')
+            draft=$(echo $release_info | jq -r '.draft')
+            prerelease=$(echo $release_info | jq -r '.prerelease')
+
+            # 创建 Release
+            echo "Creating release for tag: $tag"
+            release_response=$(curl -s -X POST https://api.github.com/repos/klcb2010/yourtv/releases \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -d "{
+                \"tag_name\": \"$tag\",
+                \"name\": \"$name\",
+                \"body\": \"$body\",
+                \"draft\": $draft,
+                \"prerelease\": $prerelease
+              }")
+            release_id=$(echo $release_response | jq -r '.id')
+
+            # 获取并上传附件
+            assets=$(echo $release_info | jq -r '.assets[].browser_download_url')
+            for asset in $assets; do
+              file_name=$(basename "$asset")
+              echo "Downloading $file_name and uploading to release"
+              curl -L -o "$file_name" -H "Accept: application/octet-stream" "$asset"
+              curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"$file_name" \
+                "https://uploads.github.com/repos/klcb2010/yourtv/releases/$release_id/assets?name=$file_name"
+              rm "$file_name"
+            done
+          done
